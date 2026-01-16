@@ -4,7 +4,7 @@
 
 The workflow consists of:
 1. **Compression of CHGCAR charge-density data using a Variational Autoencoder (VAE)** to obtain a low-dimensional latent representation.
-2. **Prediction of material properties using LightGBM (LGBM)** trained on the latent features.
+2. **Prediction of material properties using Fusion Model** trained on the latent features.
 
 ---
 

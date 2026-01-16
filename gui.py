@@ -55,7 +55,7 @@ class SplashScreen:
             # Title - using simple ASCII
             title_label = tk.Label(
                 main_frame, 
-                text="LatentMatLGBM", 
+                text="LatentMatFusion", 
                 font=('Arial', 16, 'bold'),
                 fg='white', 
                 bg='#34495e'
@@ -503,7 +503,7 @@ class ChargeDensityGUI:
         
     def init_main_window(self):
         self.root.deiconify()  # Show main window
-        self.root.title("LatentMatLGBM - Property Predictor")
+        self.root.title("LatentMatFusion - Property Predictor")
         self.root.configure(bg='#f8f9fa')
         
         # Set fixed window size
@@ -562,7 +562,7 @@ class ChargeDensityGUI:
         
         title_label = tk.Label(
             header_frame, 
-            text="LatentMatLGBM", 
+            text="LatentMatFusion", 
             font=('Arial', 20, 'bold'),
             fg='#2c3e50', 
             bg='#f8f9fa'
@@ -868,7 +868,7 @@ class ChargeDensityGUI:
     def _show_prediction_result(self, results):
         """Show prediction results in a custom dialog"""
         result_window = tk.Toplevel(self.root)
-        result_window.title("Prediction Results - LatentMatLGBM")
+        result_window.title("Prediction Results - LatentMatFusion")
         result_window.configure(bg='white')
         result_window.geometry('500x520')
         result_window.resizable(False, False)
