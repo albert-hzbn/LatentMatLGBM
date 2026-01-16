@@ -1,6 +1,6 @@
-# LatentMatLGBM
+# LatentMatFusion
 
-**LatentMatLGBM** is a machine-learning application for materials property prediction based on **VASP CHGCAR** data.
+**LatentMatFusion** is a machine-learning application for materials property prediction based on **VASP CHGCAR** data.
 
 The workflow consists of:
 1. **Compression of CHGCAR charge-density data using a Variational Autoencoder (VAE)** to obtain a low-dimensional latent representation.
