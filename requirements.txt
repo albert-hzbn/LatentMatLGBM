@@ -5,3 +5,4 @@ pymatgen==2025.10.7
 pyvista==0.46.5
 lightgbm==4.6.0
 tensorflow==2.20.0
+ase==3.24.0
