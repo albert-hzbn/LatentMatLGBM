@@ -14,15 +14,18 @@ except ImportError:
     PYVISTA_AVAILABLE = False
     print("PyVista not available - 3D visualization will be disabled")
 
-from predictor import load_charge_density, preprocess_data, predict_property
+from predictor import load_charge_density, preprocess_data, predict_property, predict_property_magpie_only
+from reconstruct import write_chgcar
+from ase.io import read as ase_read
+from tensorflow.keras.models import load_model
 
 # ----------------------------
 # Config
 # ----------------------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 # Model paths
-ENCODER_PATH = os.path.join(BASE_DIR, "model", "6059_encoder_model_128.h5")
-DECODER_PATH = os.path.join(BASE_DIR, "model", "6059_decoder_model_128.h5")
+ENCODER_PATH = os.path.join(BASE_DIR, "model", "current", "6059_encoder_model_128.h5")
+DECODER_PATH = os.path.join(BASE_DIR, "model", "current", "6059_decoder_model_128.h5")
 
 
 class SplashScreen:
@@ -118,6 +121,8 @@ class LatentSpaceTab:
     def __init__(self, parent_frame):
         self.parent_frame = parent_frame
         self.latent_data = None
+        self.latent_file_path = None
+        self.poscar_path = None
         self.original_shape = None
         self.setup_ui()
     
@@ -163,10 +168,10 @@ class LatentSpaceTab:
             pady=5
         )
         load_section.pack(fill='x', padx=15, pady=(15, 10))
-        
-        # Load button
+
+        # Load latent button
         self.load_latent_button = tk.Button(
-            load_section, 
+            load_section,
             text="Load Latent Space Data (.npy)",
             command=self.load_latent_data,
             font=('Arial', 10, 'bold'),
@@ -178,13 +183,13 @@ class LatentSpaceTab:
             cursor='hand2'
         )
         self.load_latent_button.pack(pady=8)
-        
-        # Info display
+
+        # Latent info display
         info_frame = tk.Frame(load_section, bg='#ecf0f1', relief='solid', bd=1)
         info_frame.pack(fill='x', padx=5, pady=(5, 8))
-        
+
         self.latent_info_label = tk.Label(
-            info_frame, 
+            info_frame,
             text="No latent space data loaded. Please select a .npy file containing latent representations.",
             font=('Arial', 9),
             fg='#7f8c8d',
@@ -196,6 +201,49 @@ class LatentSpaceTab:
             height=3
         )
         self.latent_info_label.pack(fill='x')
+
+        # POSCAR loading section
+        poscar_section = tk.LabelFrame(
+            content_frame,
+            text="  Load Structure (POSCAR)  ",
+            font=('Arial', 11, 'bold'),
+            fg='#34495e',
+            bg='white',
+            padx=10,
+            pady=5
+        )
+        poscar_section.pack(fill='x', padx=15, pady=(0, 10))
+
+        self.load_poscar_button = tk.Button(
+            poscar_section,
+            text="Load POSCAR / Structure File",
+            command=self.load_poscar,
+            font=('Arial', 10, 'bold'),
+            bg='#e67e22',
+            fg='white',
+            relief='flat',
+            padx=15,
+            pady=8,
+            cursor='hand2'
+        )
+        self.load_poscar_button.pack(pady=8)
+
+        poscar_info_frame = tk.Frame(poscar_section, bg='#ecf0f1', relief='solid', bd=1)
+        poscar_info_frame.pack(fill='x', padx=5, pady=(5, 8))
+
+        self.poscar_info_label = tk.Label(
+            poscar_info_frame,
+            text="No structure file loaded. Required for lattice vectors and atomic positions in the CHGCAR.",
+            font=('Arial', 9),
+            fg='#7f8c8d',
+            bg='#ecf0f1',
+            padx=10,
+            pady=10,
+            justify='left',
+            wraplength=650,
+            height=2
+        )
+        self.poscar_info_label.pack(fill='x')
         
         # # Shape configuration section
         # shape_section = tk.LabelFrame(
@@ -263,8 +311,8 @@ class LatentSpaceTab:
         export_section.pack(fill='x', padx=15, pady=10)
         
         self.export_button = tk.Button(
-            export_section, 
-            text="Export to CHGCAR Format",
+            export_section,
+            text="Decode & Export to CHGCAR",
             command=self.export_to_chgcar,
             state=tk.DISABLED,
             font=('Arial', 10, 'bold'),
@@ -297,6 +345,12 @@ class LatentSpaceTab:
         )
         self.latent_progress.pack(pady=8, padx=10, fill='x')
     
+    def _check_export_ready(self):
+        if self.latent_data is not None and self.poscar_path is not None:
+            self.export_button.config(state=tk.NORMAL)
+        else:
+            self.export_button.config(state=tk.DISABLED)
+
     def load_latent_data(self):
         file_path = filedialog.askopenfilename(
             title="Select latent space data file",
@@ -304,175 +358,120 @@ class LatentSpaceTab:
         )
         if not file_path:
             return
-        
+
         self.load_latent_button.configure(text="Loading...", state=tk.DISABLED)
         self.latent_progress.start(10)
-        
+
         def _load():
             try:
-                # Load the latent data
                 self.latent_data = np.load(file_path)
-                
-                # Update UI on main thread
+                self.latent_file_path = file_path
                 self.parent_frame.after(0, self._update_latent_ui_after_load, file_path)
-                
             except Exception as e:
                 self.parent_frame.after(0, self._handle_latent_load_error, str(e))
-        
+
         threading.Thread(target=_load, daemon=True).start()
-    
+
     def _update_latent_ui_after_load(self, file_path):
         self.latent_progress.stop()
-        self.load_latent_button.configure(
-            text="Load Latent Space Data (.npy)", 
-            state=tk.NORMAL
-        )
-        
+        self.load_latent_button.configure(text="Load Latent Space Data (.npy)", state=tk.NORMAL)
         filename = os.path.basename(file_path)
         info_text = (f"File: {filename}\n"
-                    f"Latent shape: {self.latent_data.shape}\n"
-                    f"Data type: {self.latent_data.dtype} | Ready for export")
-        
-        self.latent_info_label.config(
-            text=info_text,
-            fg='#27ae60',
-            bg='#d5f4e6'
-        )
-        
-        self.export_button.config(state=tk.NORMAL)
-    
+                     f"Latent shape: {self.latent_data.shape}\n"
+                     f"Data type: {self.latent_data.dtype}")
+        self.latent_info_label.config(text=info_text, fg='#27ae60', bg='#d5f4e6')
+        self._check_export_ready()
+
     def _handle_latent_load_error(self, error_msg):
         self.latent_progress.stop()
-        self.load_latent_button.configure(
-            text="Load Latent Space Data (.npy)", 
-            state=tk.NORMAL
-        )
-        self.export_button.config(state=tk.DISABLED)
-        
-        self.latent_info_label.config(
-            text=f"Error loading file: {error_msg}",
-            fg='#e74c3c',
-            bg='#fdf2f2'
-        )
+        self.load_latent_button.configure(text="Load Latent Space Data (.npy)", state=tk.NORMAL)
+        self.latent_info_label.config(text=f"Error: {error_msg}", fg='#e74c3c', bg='#fdf2f2')
         messagebox.showerror("File Load Error", error_msg)
+
+    def load_poscar(self):
+        file_path = filedialog.askopenfilename(
+            title="Select POSCAR or structure file",
+            filetypes=[("POSCAR files", "POSCAR*"), ("VASP files", "*.vasp"),
+                       ("CIF files", "*.cif"), ("All files", "*.*")]
+        )
+        if not file_path:
+            return
+        try:
+            atoms = ase_read(file_path)
+            self.poscar_path = file_path
+            filename = os.path.basename(file_path)
+            cell = atoms.get_cell()
+            info_text = (f"File: {filename} | "
+                         f"{len(atoms)} atoms | "
+                         f"Cell: {cell[0,0]:.3f} x {cell[1,1]:.3f} x {cell[2,2]:.3f} Å")
+            self.poscar_info_label.config(text=info_text, fg='#27ae60', bg='#d5f4e6')
+            self._check_export_ready()
+        except Exception as e:
+            self.poscar_path = None
+            self.poscar_info_label.config(text=f"Error reading structure: {e}",
+                                           fg='#e74c3c', bg='#fdf2f2')
+            messagebox.showerror("Structure Load Error", str(e))
     
     def export_to_chgcar(self):
-        if self.latent_data is None:
-            messagebox.showerror("Error", "No latent data loaded.")
+        if self.latent_data is None or self.poscar_path is None:
+            messagebox.showerror("Error", "Load both a latent .npy file and a structure file first.")
             return
-        
-        try:
-            # Get target shape
-            target_x = int(self.shape_x_var.get())
-            target_y = int(self.shape_y_var.get())
-            target_z = int(self.shape_z_var.get())
-            target_shape = (target_x, target_y, target_z)
-        except ValueError:
-            messagebox.showerror("Error", "Please enter valid integer values for shape dimensions.")
-            return
-        
-        # Get save location
+
         save_path = filedialog.asksaveasfilename(
             title="Save CHGCAR file",
-            defaultextension=".CHGCAR",
+            initialfile="CHGCAR_reconstructed",
             filetypes=[("CHGCAR files", "CHGCAR*"), ("All files", "*.*")]
         )
         if not save_path:
             return
-        
-        self.export_button.configure(text="Exporting...", state=tk.DISABLED)
+
+        self.export_button.configure(text="Decoding...", state=tk.DISABLED)
         self.latent_progress.start(10)
-        
+
+        latent_snapshot = self.latent_data
+        poscar_snapshot = self.poscar_path
+
         def _export():
             try:
-                # Process latent data and convert to charge density format
-                charge_density = self._latent_to_charge_density(self.latent_data, target_shape)
-                
-                # Export to CHGCAR format
-                self._write_chgcar(charge_density, save_path)
-                
-                self.parent_frame.after(0, lambda: self._export_success(save_path, target_shape))
-                
+                # --- Decode latent → charge density (mirrors reconstruct.py logic) ---
+                decoder = load_model(DECODER_PATH, compile=False)
+
+                latent = latent_snapshot.copy()
+                latent = np.expand_dims(latent, axis=0)          # add batch dim
+                if latent.ndim == 4:                              # missing channel dim
+                    latent = np.expand_dims(latent, axis=-1)
+
+                if latent.max() != 0:
+                    latent = latent / latent.max()
+
+                charge_density = decoder.predict(latent, verbose=0)[0]
+                if charge_density.ndim == 4 and charge_density.shape[-1] == 1:
+                    charge_density = charge_density[..., 0]
+
+                # --- Write proper CHGCAR using reconstruct.write_chgcar ---
+                atoms = ase_read(poscar_snapshot)
+                write_chgcar(save_path, atoms, charge_density)
+
+                shape_str = f"{charge_density.shape[0]}×{charge_density.shape[1]}×{charge_density.shape[2]}"
+                self.parent_frame.after(0, lambda: self._export_success(save_path, shape_str))
+
             except Exception as e:
-                self.parent_frame.after(0, lambda: self._export_error(str(e)))
-        
+                err = str(e)
+                self.parent_frame.after(0, lambda: self._export_error(err))
+
         threading.Thread(target=_export, daemon=True).start()
-    
-    def _latent_to_charge_density(self, latent_data, target_shape):
-        """Convert latent space data to charge density format"""
-        # This is a placeholder - you'll need to implement the actual conversion
-        # based on your specific latent space representation
-        
-        if latent_data.ndim == 1:
-            # If it's a 1D latent vector, reshape to target shape
-            total_elements = target_shape[0] * target_shape[1] * target_shape[2]
-            if latent_data.shape[0] == total_elements:
-                charge_density = latent_data.reshape(target_shape)
-            else:
-                # Interpolate or pad/truncate as needed
-                if latent_data.shape[0] < total_elements:
-                    # Pad with zeros or interpolate
-                    padded = np.pad(latent_data, (0, total_elements - latent_data.shape[0]), 'constant')
-                    charge_density = padded.reshape(target_shape)
-                else:
-                    # Truncate
-                    charge_density = latent_data[:total_elements].reshape(target_shape)
-        elif latent_data.ndim == 3:
-            # If it's already 3D, resize to target shape
-            from scipy.ndimage import zoom
-            zoom_factors = [target_shape[i] / latent_data.shape[i] for i in range(3)]
-            charge_density = zoom(latent_data, zoom_factors, order=1)
-        else:
-            raise ValueError(f"Unsupported latent data shape: {latent_data.shape}")
-        
-        # Ensure positive values (typical for charge density)
-        charge_density = np.abs(charge_density)
-        
-        return charge_density
-    
-    def _write_chgcar(self, charge_density, filepath):
-        """Write charge density data to CHGCAR format"""
-        # This is a simplified CHGCAR writer - you may need to adjust based on your needs
-        with open(filepath, 'w') as f:
-            # Write header (simplified)
-            f.write("Generated from latent space data\n")
-            f.write("1.0\n")
-            f.write("10.0 0.0 0.0\n")
-            f.write("0.0 10.0 0.0\n")
-            f.write("0.0 0.0 10.0\n")
-            f.write("C\n")
-            f.write("1\n")
-            f.write("Direct\n")
-            f.write("0.0 0.0 0.0\n")
-            f.write("\n")
-            
-            # Write grid dimensions
-            f.write(f"{charge_density.shape[0]} {charge_density.shape[1]} {charge_density.shape[2]}\n")
-            
-            # Write charge density data
-            count = 0
-            for value in charge_density.flatten():
-                f.write(f"{value:.6e} ")
-                count += 1
-                if count % 5 == 0:  # New line every 5 values
-                    f.write("\n")
-            
-            if count % 5 != 0:
-                f.write("\n")
-    
-    def _export_success(self, save_path, target_shape):
+
+    def _export_success(self, save_path, shape_str):
         self.latent_progress.stop()
-        self.export_button.configure(text="Export to CHGCAR Format", state=tk.NORMAL)
-        
-        filename = os.path.basename(save_path)
+        self.export_button.configure(text="Decode & Export to CHGCAR", state=tk.NORMAL)
         messagebox.showinfo(
-            "Export Successful", 
-            f"Successfully exported to {filename}\nTarget shape: {target_shape}"
+            "Export Successful",
+            f"CHGCAR written to:\n{save_path}\nCharge density grid: {shape_str}"
         )
-    
+
     def _export_error(self, error_msg):
         self.latent_progress.stop()
-        self.export_button.configure(text="Export to CHGCAR Format", state=tk.NORMAL)
+        self.export_button.configure(text="Decode & Export to CHGCAR", state=tk.NORMAL)
         messagebox.showerror("Export Error", f"Export failed: {error_msg}")
 
 
@@ -583,27 +582,67 @@ class ChargeDensityGUI:
         content_frame.pack(fill='both', expand=True)
         
         # Use grid for better control
-        content_frame.grid_rowconfigure(0, weight=0)  # File section - fixed
-        content_frame.grid_rowconfigure(1, weight=0)  # Viz section - fixed  
-        content_frame.grid_rowconfigure(2, weight=0)  # Predict section - fixed
-        content_frame.grid_rowconfigure(3, weight=0)  # Progress section - fixed
+        content_frame.grid_rowconfigure(0, weight=0)  # Mode selector
+        content_frame.grid_rowconfigure(1, weight=0)  # File / formula section
+        content_frame.grid_rowconfigure(2, weight=0)  # Viz section
+        content_frame.grid_rowconfigure(3, weight=0)  # Predict section
+        content_frame.grid_rowconfigure(4, weight=0)  # Progress section
         content_frame.grid_columnconfigure(0, weight=1)
-        
-        # File loading section
-        file_section = tk.LabelFrame(
-            content_frame, 
-            text="  Data Input  ", 
+
+        # --- Mode selector (row 0) ---
+        self.pred_mode = tk.StringVar(value="chgcar")
+
+        mode_section = tk.LabelFrame(
+            content_frame,
+            text="  Prediction Mode  ",
             font=('Arial', 11, 'bold'),
             fg='#34495e',
             bg='white',
             padx=10,
             pady=5
         )
-        file_section.grid(row=0, column=0, sticky='ew', padx=15, pady=(15, 8))
-        
+        mode_section.grid(row=0, column=0, sticky='ew', padx=15, pady=(15, 8))
+
+        mode_inner = tk.Frame(mode_section, bg='white')
+        mode_inner.pack(pady=4)
+
+        tk.Radiobutton(
+            mode_inner,
+            text="CHGCAR  (charge density + Magpie)",
+            variable=self.pred_mode,
+            value="chgcar",
+            font=('Arial', 10),
+            bg='white',
+            activebackground='white',
+            command=self._on_pred_mode_change
+        ).pack(side='left', padx=(0, 30))
+
+        tk.Radiobutton(
+            mode_inner,
+            text="Magpie only  (formula string)",
+            variable=self.pred_mode,
+            value="magpie",
+            font=('Arial', 10),
+            bg='white',
+            activebackground='white',
+            command=self._on_pred_mode_change
+        ).pack(side='left')
+
+        # --- File loading section (row 1, CHGCAR mode) ---
+        self.file_section = tk.LabelFrame(
+            content_frame,
+            text="  Data Input  ",
+            font=('Arial', 11, 'bold'),
+            fg='#34495e',
+            bg='white',
+            padx=10,
+            pady=5
+        )
+        self.file_section.grid(row=1, column=0, sticky='ew', padx=15, pady=(0, 8))
+
         # Load button
         self.load_button = tk.Button(
-            file_section, 
+            self.file_section, 
             text="Load Charge Density File (CHGCAR)",
             command=self.load_file,
             font=('Arial', 10, 'bold'),
@@ -617,7 +656,7 @@ class ChargeDensityGUI:
         self.load_button.pack(pady=8)
         
         # Info display with fixed height
-        info_frame = tk.Frame(file_section, bg='#ecf0f1', relief='solid', bd=1)
+        info_frame = tk.Frame(self.file_section, bg='#ecf0f1', relief='solid', bd=1)
         info_frame.pack(fill='x', padx=5, pady=(5, 8))
         
         self.info_label = tk.Label(
@@ -633,19 +672,74 @@ class ChargeDensityGUI:
             height=4  # Fixed height in lines
         )
         self.info_label.pack(fill='x')
-        
-        # Visualization section
+
+        # --- Formula input section (row 1, Magpie-only mode, initially hidden) ---
+        self.formula_section = tk.LabelFrame(
+            content_frame,
+            text="  Formula Input  ",
+            font=('Arial', 11, 'bold'),
+            fg='#34495e',
+            bg='white',
+            padx=10,
+            pady=5
+        )
+        # Not gridded yet — shown only in Magpie-only mode
+
+        formula_inner = tk.Frame(self.formula_section, bg='white')
+        formula_inner.pack(fill='x', pady=8, padx=5)
+
+        tk.Label(
+            formula_inner,
+            text="Formula (e.g. Al2O3_167 or Al2O3):",
+            font=('Arial', 10),
+            bg='white'
+        ).pack(side='left', padx=(0, 10))
+
+        self.formula_var = tk.StringVar()
+        self.formula_entry = tk.Entry(
+            formula_inner,
+            textvariable=self.formula_var,
+            font=('Arial', 11),
+            width=28
+        )
+        self.formula_entry.pack(side='left')
+        self.formula_entry.bind('<Return>', lambda e: self._on_formula_set())
+
+        self.formula_set_btn = tk.Button(
+            formula_inner,
+            text="Set",
+            command=self._on_formula_set,
+            font=('Arial', 10, 'bold'),
+            bg='#3498db',
+            fg='white',
+            relief='flat',
+            padx=10,
+            pady=4,
+            cursor='hand2'
+        )
+        self.formula_set_btn.pack(side='left', padx=(8, 0))
+
+        self.formula_status_label = tk.Label(
+            self.formula_section,
+            text="Enter a formula above and click Set to enable prediction.",
+            font=('Arial', 9),
+            fg='#7f8c8d',
+            bg='white'
+        )
+        self.formula_status_label.pack(pady=(0, 6))
+
+        # --- Visualization section (row 2) ---
         if PYVISTA_AVAILABLE:
             viz_section = tk.LabelFrame(
-                content_frame, 
-                text="  3D Visualization  ", 
+                content_frame,
+                text="  3D Visualization  ",
                 font=('Arial', 11, 'bold'),
                 fg='#34495e',
                 bg='white',
                 padx=10,
                 pady=5
             )
-            viz_section.grid(row=1, column=0, sticky='ew', padx=15, pady=8)
+            viz_section.grid(row=2, column=0, sticky='ew', padx=15, pady=8)
             
             self.viz_button = tk.Button(
                 viz_section, 
@@ -664,15 +758,15 @@ class ChargeDensityGUI:
         
         # Prediction section
         predict_section = tk.LabelFrame(
-            content_frame, 
-            text="  AI Prediction  ", 
+            content_frame,
+            text="  AI Prediction  ",
             font=('Arial', 11, 'bold'),
             fg='#34495e',
             bg='white',
             padx=10,
             pady=5
         )
-        predict_section.grid(row=2, column=0, sticky='ew', padx=15, pady=8)
+        predict_section.grid(row=3, column=0, sticky='ew', padx=15, pady=8)
         
         self.predict_button = tk.Button(
             predict_section, 
@@ -691,15 +785,15 @@ class ChargeDensityGUI:
         
         # Progress section
         progress_section = tk.LabelFrame(
-            content_frame, 
-            text="  Processing Status  ", 
+            content_frame,
+            text="  Processing Status  ",
             font=('Arial', 11, 'bold'),
             fg='#34495e',
             bg='white',
             padx=10,
             pady=5
         )
-        progress_section.grid(row=3, column=0, sticky='ew', padx=15, pady=(8, 15))
+        progress_section.grid(row=4, column=0, sticky='ew', padx=15, pady=(8, 15))
         
         self.progress = ttk.Progressbar(
             progress_section, 
@@ -708,6 +802,35 @@ class ChargeDensityGUI:
             mode="indeterminate"
         )
         self.progress.pack(pady=8, padx=10, fill='x')
+
+    def _on_pred_mode_change(self):
+        if self.pred_mode.get() == "chgcar":
+            self.formula_section.grid_remove()
+            self.file_section.grid(row=1, column=0, sticky='ew', padx=15, pady=(0, 8))
+            # Disable predict until a file is loaded
+            if self.processed_data is None:
+                self.predict_button.config(state=tk.DISABLED)
+        else:
+            self.file_section.grid_remove()
+            self.formula_section.grid(row=1, column=0, sticky='ew', padx=15, pady=(0, 8))
+            # Disable predict until formula is set
+            if not self.formula_var.get().strip():
+                self.predict_button.config(state=tk.DISABLED)
+
+    def _on_formula_set(self):
+        formula = self.formula_var.get().strip()
+        if not formula:
+            self.formula_status_label.config(
+                text="Please enter a formula before predicting.",
+                fg='#e74c3c'
+            )
+            self.predict_button.config(state=tk.DISABLED)
+            return
+        self.formula_status_label.config(
+            text=f"Formula set: {formula}  —  Ready for Magpie-only prediction.",
+            fg='#27ae60'
+        )
+        self.predict_button.config(state=tk.NORMAL)
 
     def load_file(self):
         self.file_path = filedialog.askopenfilename(
@@ -824,18 +947,25 @@ class ChargeDensityGUI:
             messagebox.showerror("Visualization Error", f"3D visualization failed: {str(e)}")
 
     def predict(self):
-        if self.processed_data is None:
-            messagebox.showerror("Error", "No data loaded.")
-            return
+        if self.pred_mode.get() == "magpie":
+            formula = self.formula_var.get().strip()
+            if not formula:
+                messagebox.showerror("Error", "Please set a formula first.")
+                return
+            self._run_prediction_magpie_only(formula)
+        else:
+            if self.processed_data is None:
+                messagebox.showerror("Error", "No data loaded.")
+                return
+            self._run_prediction_chgcar()
 
-        # Update UI for prediction state
+    def _run_prediction_chgcar(self):
         self.load_button.config(state=tk.DISABLED)
         self.predict_button.config(text="Predicting...", state=tk.DISABLED)
         self.progress.start(10)
 
         def _run():
             try:
-                # Predict all three properties
                 bulk_modulus = predict_property(self.file_path, self.processed_data, "bulk_modulus", ENCODER_PATH)
                 shear_modulus = predict_property(self.file_path, self.processed_data, "shear_modulus", ENCODER_PATH)
                 youngs_modulus = predict_property(self.file_path, self.processed_data, "youngs_modulus", ENCODER_PATH)
@@ -848,23 +978,49 @@ class ChargeDensityGUI:
                     'formation_energy': formation_energy,
                     'debye_temperature': debye_temperature
                 }
-                
                 self.root.after(0, lambda: self._show_prediction_result(results))
             except Exception as e:
                 error_msg = str(e)
                 self.root.after(
                     0,
-                    lambda msg=error_msg: messagebox.showerror(
-                        "Prediction Error",
-                        f"Prediction failed: {msg}"
-                    )
+                    lambda msg=error_msg: messagebox.showerror("Prediction Error", f"Prediction failed: {msg}")
                 )
-
             finally:
                 self.root.after(0, self._reset_ui_after_prediction)
 
         threading.Thread(target=_run, daemon=True).start()
-    
+
+    def _run_prediction_magpie_only(self, formula):
+        self.predict_button.config(text="Predicting...", state=tk.DISABLED)
+        self.progress.start(10)
+
+        def _run():
+            try:
+                bulk_modulus = predict_property_magpie_only(formula, "bulk_modulus")
+                shear_modulus = predict_property_magpie_only(formula, "shear_modulus")
+                youngs_modulus = predict_property_magpie_only(formula, "youngs_modulus")
+                formation_energy = predict_property_magpie_only(formula, "formation_energy")
+                debye_temperature = predict_property_magpie_only(formula, "debye_temperature")
+                results = {
+                    'bulk_modulus': bulk_modulus,
+                    'shear_modulus': shear_modulus,
+                    'youngs_modulus': youngs_modulus,
+                    'formation_energy': formation_energy,
+                    'debye_temperature': debye_temperature
+                }
+                self.root.after(0, lambda: self._show_prediction_result(results))
+            except Exception as e:
+                error_msg = str(e)
+                self.root.after(
+                    0,
+                    lambda msg=error_msg: messagebox.showerror("Prediction Error", f"Prediction failed: {msg}")
+                )
+            finally:
+                self.root.after(0, self._reset_ui_after_prediction)
+
+        threading.Thread(target=_run, daemon=True).start()
+
+
     def _show_prediction_result(self, results):
         """Show prediction results in a custom dialog"""
         result_window = tk.Toplevel(self.root)
@@ -900,9 +1056,10 @@ class ChargeDensityGUI:
         header_label.pack(pady=(10, 5))
         
         # Subheader
+        mode_label = "charge density data" if self.pred_mode.get() == "chgcar" else "Magpie features"
         sub_label = tk.Label(
             main_frame,
-            text="AI models have analyzed your charge density data",
+            text=f"AI models have analyzed your {mode_label}",
             font=('Arial', 10),
             fg='#7f8c8d',
             bg='white'
@@ -935,7 +1092,6 @@ class ChargeDensityGUI:
             prop_frame = tk.Frame(results_frame, bg='white', relief='solid', bd=1)
             prop_frame.pack(fill='x', padx=15, pady=5)
 
-
             # LEFT: property name
             tk.Label(
                 prop_frame,
@@ -946,12 +1102,18 @@ class ChargeDensityGUI:
                 anchor='w'
             ).pack(side='left', padx=10, pady=8)
 
-            # RIGHT: value + unit
+            # RIGHT: value + unit (or N/A)
+            if value is None:
+                val_text = "N/A"
+                val_color = '#95a5a6'
+            else:
+                val_text = f"{value:.2f} {unit}"
+                val_color = color
             tk.Label(
                 prop_frame,
-                text=f"{value:.2f} {unit}",
+                text=val_text,
                 font=('Arial', 14, 'bold'),
-                fg=color,
+                fg=val_color,
                 bg='white',
                 anchor='e'
             ).pack(side='right', padx=10, pady=8)
@@ -979,8 +1141,15 @@ class ChargeDensityGUI:
         close_btn.pack()
         
         # Update main window info
-        filename = os.path.basename(self.file_path)
-        info_text = (f"Predictions: Bulk={results['bulk_modulus']:.2f} | Shear={results['shear_modulus']:.2f} | Young's={results['youngs_modulus']:.2f} GPa | Formation Energy={results['formation_energy']:.2f} eV | Debye Temperature={results['debye_temperature']:.2f} K")
+        def fmt(v, unit):
+            return f"{v:.2f} {unit}" if v is not None else "N/A"
+        info_text = (
+            f"Bulk={fmt(results['bulk_modulus'], 'GPa')} | "
+            f"Shear={fmt(results['shear_modulus'], 'GPa')} | "
+            f"Young's={fmt(results['youngs_modulus'], 'GPa')} | "
+            f"Formation={fmt(results['formation_energy'], 'eV')} | "
+            f"Debye={fmt(results['debye_temperature'], 'K')}"
+        )
         
         # info_text = (f"File: {filename}\n"
         #             f"Shape: {self.charge_density.shape} -> {self.processed_data.shape}\n"
@@ -995,14 +1164,19 @@ class ChargeDensityGUI:
 
     def _reset_ui_after_prediction(self):
         self.progress.stop()
-        self.load_button.config(state=tk.NORMAL)
         self.predict_button.config(text="Predict Mechanical Properties")
 
-        # Only re-enable Predict if valid data is still loaded
-        if self.processed_data is not None:
-            self.predict_button.config(state=tk.NORMAL)
+        if self.pred_mode.get() == "chgcar":
+            self.load_button.config(state=tk.NORMAL)
+            if self.processed_data is not None:
+                self.predict_button.config(state=tk.NORMAL)
+            else:
+                self.predict_button.config(state=tk.DISABLED)
         else:
-            self.predict_button.config(state=tk.DISABLED)
+            if self.formula_var.get().strip():
+                self.predict_button.config(state=tk.NORMAL)
+            else:
+                self.predict_button.config(state=tk.DISABLED)
 
 
 if __name__ == "__main__":

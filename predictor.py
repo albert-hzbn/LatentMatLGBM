@@ -122,17 +122,19 @@ def generate_missing_magpie_features(formula_input, magpie_csv_path, assets_df):
 def load_prediction_assets_lgbm(type=None):
     """Loads all necessary files (model, scalers, PCA, lookup table)."""
     assets = {}
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    model_dir = os.path.join(base_dir, "model", "current", type)
     try:
         # Load the trained model
-        assets['model'] = joblib.load(f'./model/{type}_LGBM.pkl')
+        assets['model'] = joblib.load(os.path.join(model_dir, f'{type}_GBM.pkl'))
         
         # Load the preprocessors (the "keys")
-        assets['scaler_3d'] = joblib.load(f'./model/{type}_pca_scaler.pkl')
-        assets['pca'] = joblib.load(f'./model/{type}_pca_model.pkl')
-        assets['magpie_scaler'] = joblib.load(f'./model/{type}_magpie_scaler.pkl')
+        assets['scaler_3d'] = joblib.load(os.path.join(model_dir, f'{type}_pca_scaler.pkl'))
+        assets['pca'] = joblib.load(os.path.join(model_dir, f'{type}_pca_model.pkl'))
+        assets['magpie_scaler'] = joblib.load(os.path.join(model_dir, f'{type}_magpie_scaler.pkl'))
 
         # Load the Magpie feature lookup table
-        assets['magpie_csv_path'] = './model/magpie_features.csv' # Store path
+        assets['magpie_csv_path'] = os.path.join(model_dir, 'magpie_features.csv')
         assets['magpie_lookup_df'] = pd.read_csv(assets['magpie_csv_path'])
         assets['magpie_cols'] = [col for col in assets['magpie_lookup_df'].columns if col != 'formula_sp']
         
@@ -141,8 +143,7 @@ def load_prediction_assets_lgbm(type=None):
     except FileNotFoundError as e:
         print(f"--- FATAL ERROR: Could not load all model assets. ---")
         print(f"Missing file: {e.filename}")
-        print("Please ensure all files are in the same directory:")
-        print("[To_Publish_Formation_Energy_Best.pkl, scaler_3d.pkl, pca_transformer.pkl, magpie_scaler.pkl, magpie_features.csv]")
+        print(f"Expected files in: {model_dir}")
         return None
     except Exception as e:
         print(f"An unknown error occurred loading assets: {e}")
@@ -211,6 +212,7 @@ def predict_property(chgcar_path, data, prop_type, encoder_path):
 
     # Load models
     encoder = load_model(encoder_path)
+    print(encoder_path, "loaded successfully.")
 
     # convert loaded model to numPy array
     features = encoder.predict(x)
@@ -235,4 +237,73 @@ def predict_property(chgcar_path, data, prop_type, encoder_path):
 
         else:
             return 0.0
-        
+
+
+def load_prediction_assets_magpie_only(type=None):
+    """Loads assets for Magpie-only prediction (no charge density needed)."""
+    assets = {}
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    model_dir = os.path.join(base_dir, "model", "current", type)
+    try:
+        assets['model'] = joblib.load(os.path.join(model_dir, f'{type}_GBMMagpieOnly.pkl'))
+        assets['magpie_scaler'] = joblib.load(os.path.join(model_dir, f'{type}_magpie_scaler.pkl'))
+        assets['magpie_csv_path'] = os.path.join(model_dir, 'magpie_features.csv')
+        assets['magpie_lookup_df'] = pd.read_csv(assets['magpie_csv_path'])
+        assets['magpie_cols'] = [col for col in assets['magpie_lookup_df'].columns if col != 'formula_sp']
+        print("All Magpie-only model assets loaded successfully.")
+    except FileNotFoundError as e:
+        print(f"--- FATAL ERROR: Could not load Magpie-only model assets. ---")
+        print(f"Missing file: {e.filename}")
+        print(f"Expected files in: {model_dir}")
+        return None
+    except Exception as e:
+        print(f"An unknown error occurred loading Magpie-only assets: {e}")
+        return None
+    return assets
+
+
+def predict_magpie_only(formula: str, assets: dict) -> float:
+    """Predicts a property using Magpie features only (no charge density input)."""
+    if not assets:
+        print("Error: Model assets are not loaded.")
+        return None
+
+    print(f"\n--- Magpie-Only Predicting for {formula} ---")
+
+    try:
+        x_1d_features = assets['magpie_lookup_df'][
+            assets['magpie_lookup_df']['formula_sp'] == formula
+        ][assets['magpie_cols']]
+
+        if x_1d_features.empty:
+            new_row = generate_missing_magpie_features(formula, assets['magpie_csv_path'], assets['magpie_lookup_df'])
+            if new_row is not None:
+                x_1d_features = new_row[assets['magpie_cols']]
+                assets['magpie_lookup_df'] = pd.concat([assets['magpie_lookup_df'], new_row], ignore_index=True)
+            else:
+                print(f"Error: Could not generate Magpie features for '{formula}'")
+                return None
+
+    except Exception as e:
+        print(f"Error looking up/generating Magpie features: {e}")
+        return None
+
+    try:
+        x_1d_scaled = assets['magpie_scaler'].transform(x_1d_features)
+        y_pred = assets['model'].predict(x_1d_scaled)
+        return float(y_pred[0])
+    except Exception as e:
+        print(f"Error during Magpie-only prediction: {e}")
+        return None
+
+
+def predict_property_magpie_only(formula_input, prop_type):
+    """Top-level function for Magpie-only property prediction. Returns None if unavailable."""
+    model_assets = load_prediction_assets_magpie_only(prop_type)
+    if model_assets is None:
+        return None
+    prediction = predict_magpie_only(formula=formula_input, assets=model_assets)
+    if prediction is not None:
+        print(prediction)
+        return float(prediction)
+    return None
